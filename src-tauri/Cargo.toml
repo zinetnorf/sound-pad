@@ -1,0 +1,38 @@
+[package]
+name = "soundpad"
+version = "0.1.0"
+description = "Sound pad para producción de podcast en vivo"
+authors = ["Davis"]
+edition = "2021"
+
+[lib]
+# El sufijo `_lib` evita que el nombre choque con el binario en Windows.
+name = "soundpad_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cpal = "0.17"
+kira = { version = "0.12", features = ["cpal"] }
+ebur128 = "0.1"
+symphonia = { version = "0.5", features = ["mp3", "wav"] }
+hound = "3"
+midir = "0.10"
+rubato = "0.16"
+zip = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+
