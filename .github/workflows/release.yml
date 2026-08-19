@@ -47,5 +47,5 @@ jobs:
           tagName: app-v__VERSION__
           releaseName: "Sound Pad v__VERSION__"
           releaseBody: "Instalador (.dmg) para macOS generado automáticamente por CI. Ver README para instrucciones de instalación."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
