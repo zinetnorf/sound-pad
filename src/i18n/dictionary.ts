@@ -48,6 +48,8 @@ export interface Dictionary {
     midiDeviceTooltip: string;
     noMidiDevice: string;
     languageTooltip: string;
+    gridColumns: string;
+    gridColumnsTooltip: string;
     targetLufs: string;
     targetLufsTooltip: string;
     renormalizeAll: string;
@@ -194,6 +196,8 @@ export const en: Dictionary = {
     midiDeviceTooltip: "The MIDI controller the app listens to for triggering pads. Runs in omni mode — it listens on every channel.",
     noMidiDevice: "(no MIDI device)",
     languageTooltip: "Changes the app's interface language. Pad and bank names you typed are never translated — they stay exactly as you wrote them.",
+    gridColumns: "Grid columns",
+    gridColumnsTooltip: "Number of pad columns shown in the grid. Pads resize automatically to fit the window.",
     targetLufs: "Target LUFS",
     targetLufsTooltip: "The loudness level every pad is normalized to on import. Changing it does not affect existing pads until you click \"Renormalize all\".",
     renormalizeAll: "Renormalize all",
@@ -341,6 +345,8 @@ export const es: Dictionary = {
     midiDeviceTooltip: "El controlador MIDI que escucha la app para disparar pads. Funciona en modo omni — escucha en todos los canales.",
     noMidiDevice: "(sin dispositivo MIDI)",
     languageTooltip: "Cambia el idioma de la interfaz de la app. Los nombres de pads y bancos que escribiste nunca se traducen — se respetan tal cual los pusiste.",
+    gridColumns: "Columnas del grid",
+    gridColumnsTooltip: "Cantidad de columnas de pads que se muestran en el grid. Los pads se ajustan de tamaño automáticamente para caber en la ventana.",
     targetLufs: "Target LUFS",
     targetLufsTooltip: "El nivel de sonoridad al que se normaliza cada pad al importarlo. Cambiarlo no afecta a los pads existentes hasta que hagas clic en \"Renormalizar todo\".",
     renormalizeAll: "Renormalizar todo",

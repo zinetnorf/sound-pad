@@ -170,6 +170,24 @@ function SettingsModal({ config, outputDevices, midiDevices, onClose, onChanged 
           </select>
         </label>
 
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="flex items-center gap-1">
+            {t.settings.gridColumns}
+            <HelpTooltip text={t.settings.gridColumnsTooltip} />
+          </span>
+          <select
+            className="rounded border border-neutral-700 bg-neutral-950 px-3 py-2 focus:border-primary focus:outline-none"
+            value={config.gridColumns}
+            onChange={(e) => updateConfig({ gridColumns: Number(e.currentTarget.value) })}
+          >
+            {[3, 4, 5, 6].map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+
         <div className="flex items-end gap-2">
           <label className="flex flex-1 flex-col gap-1 text-sm">
             <span className="flex items-center gap-1">

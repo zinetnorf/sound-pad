@@ -271,7 +271,7 @@ function AppView({
           mode === "config" ? (
             <PadList bank={activeBank} playing={playing} onChanged={loadConfig} />
           ) : (
-            <PadGrid bank={activeBank} playing={playing} />
+            <PadGrid bank={activeBank} playing={playing} columns={config?.gridColumns ?? 4} />
           )
         ) : (
           <p className="text-sm text-neutral-500">{t.app.noBanksHint}</p>

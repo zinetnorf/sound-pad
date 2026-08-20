@@ -122,6 +122,21 @@ mod tests {
     }
 
     #[test]
+    fn loads_a_config_written_before_grid_columns_existed() {
+        // gridColumns se agregó después de la v1 sin subir CURRENT_VERSION;
+        // una config vieja en disco no lo tiene y debe caer al default (4).
+        let json = r#"{
+            "version": 1, "banks": [], "activeBankId": "", "outputBufferFrames": 256,
+            "outputDevice": {"deviceId": "", "label": ""}, "midiDeviceName": null,
+            "targetLufs": -16.0, "globalHotkeysEnabled": true, "globalModifier": "Ctrl+Alt"
+        }"#;
+
+        let config = load_from_str(json).unwrap();
+
+        assert_eq!(config.grid_columns, 4);
+    }
+
+    #[test]
     fn load_or_default_returns_fresh_config_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");

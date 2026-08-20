@@ -24,10 +24,18 @@ pub struct AppConfig {
     /// en disco no trae el campo, cae al default en vez de fallar.
     #[serde(default = "default_language")]
     pub language: String,
+    /// Columnas del grid de pads. Mismo criterio que `language`: config vieja
+    /// en disco no trae el campo, cae al default en vez de fallar.
+    #[serde(default = "default_grid_columns")]
+    pub grid_columns: u32,
 }
 
 fn default_language() -> String {
     "en".to_string()
+}
+
+fn default_grid_columns() -> u32 {
+    4
 }
 
 impl AppConfig {
@@ -65,6 +73,7 @@ impl Default for AppConfig {
             global_modifier: "Ctrl+Alt".to_string(),
             panic_hotkey: None,
             language: default_language(),
+            grid_columns: default_grid_columns(),
         }
     }
 }
@@ -408,5 +417,6 @@ mod tests {
         assert_eq!(config.global_modifier, "Ctrl+Alt");
         assert!(config.banks.is_empty());
         assert_eq!(config.language, "en");
+        assert_eq!(config.grid_columns, 4);
     }
 }

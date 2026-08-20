@@ -50,4 +50,5 @@ export interface AppConfig {
   globalModifier: string;
   panicHotkey: string | null;
   language: AppLanguage;
+  gridColumns: number;
 }

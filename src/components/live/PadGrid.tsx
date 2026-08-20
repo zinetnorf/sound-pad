@@ -6,9 +6,10 @@ import { useT } from "../../i18n/LanguageContext";
 interface PadGridProps {
   bank: Bank;
   playing: Record<string, number>;
+  columns: number;
 }
 
-function PadGrid({ bank, playing }: PadGridProps) {
+function PadGrid({ bank, playing, columns }: PadGridProps) {
   const t = useT();
   async function handleTrigger(padId: string) {
     try {
@@ -18,8 +19,12 @@ function PadGrid({ bank, playing }: PadGridProps) {
     }
   }
 
+  // Defensivo: una config editada a mano podría traer un valor fuera de rango
+  // (o 0, que rompería el grid entero).
+  const safeColumns = Math.min(6, Math.max(3, columns || 4));
+
   return (
-    <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+    <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${safeColumns}, minmax(0, 1fr))` }}>
       {bank.pads.map((pad) => (
         <PadTile
           key={pad.id}
