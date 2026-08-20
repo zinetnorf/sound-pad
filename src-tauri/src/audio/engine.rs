@@ -53,6 +53,10 @@ pub struct AudioEngine {
     /// Voces activas por pad, en orden de disparo (la más vieja primero) —
     /// así el modo Overlap sabe a cuál expulsar al llegar al tope.
     active: HashMap<String, Vec<(StaticSoundHandle, u32)>>,
+    /// Voz del preview del editor de recorte. Separada de `active` a
+    /// propósito: no es un pad, no debe aparecer en `poll()`/`pad-tick` ni
+    /// contar para el tope de voces de ningún pad (SPEC-recorte-v2.md).
+    preview: Option<StaticSoundHandle>,
 }
 
 impl AudioEngine {
@@ -66,7 +70,7 @@ impl AudioEngine {
             ..Default::default()
         })
         .map_err(|e| EngineError::Backend(e.to_string()))?;
-        Ok(Self { manager, preloaded: HashMap::new(), active: HashMap::new() })
+        Ok(Self { manager, preloaded: HashMap::new(), active: HashMap::new(), preview: None })
     }
 
     /// Reproduce un tono senoidal corto. Valida que el audio sale por el
@@ -135,13 +139,52 @@ impl AudioEngine {
     /// Botón de pánico: detiene todo, todos los bancos, con fade-out corto.
     /// Devuelve los pads que estaban sonando, para que el caller emita `pad-stopped`
     /// de cada uno — si no, la UI se queda con el contador congelado (nunca se entera).
+    /// También corta el preview del editor de recorte si estaba sonando.
     pub fn stop_all(&mut self, fade_out_ms: u32) -> Vec<String> {
         let tween = tween_ms(fade_out_ms);
         let ids: Vec<String> = self.active.keys().cloned().collect();
         for id in &ids {
             self.stop_voices_for(id, tween);
         }
+        self.stop_preview();
         ids
+    }
+
+    /// Reproduce `start_ms..end_ms` de un buffer estéreo 48kHz ya en memoria,
+    /// por el mismo device que los pads — es la única forma de que el
+    /// usuario juzgue un recorte como sonará al aire (PLAN.md §2, SPEC-recorte-v2.md).
+    /// Corta cualquier preview anterior antes de arrancar el nuevo.
+    ///
+    /// El recorte se hace en Rust con índices enteros ya clampeados
+    /// (`trim::clamp_ms_range_to_frames`), NO con la conversión ms→muestras
+    /// en punto flotante de `StaticSoundData::slice()` — un ms en el borde
+    /// exacto del clip podía redondear a un frame más allá del buffer y
+    /// tronar el proceso entero (un panic de Rust no puede cruzar el límite
+    /// del motor de audio en tiempo real, así que aborta en vez de fallar
+    /// ese comando nomás).
+    pub fn preview(&mut self, stereo_48k: &[f32], start_ms: u32, end_ms: u32) -> Result<(), EngineError> {
+        self.stop_preview();
+        let frame_count = stereo_48k.len() / 2;
+        let (start_frame, end_frame) =
+            super::trim::clamp_ms_range_to_frames(start_ms, end_ms, frame_count, TARGET_SAMPLE_RATE);
+
+        let frames = stereo_to_frames(&stereo_48k[start_frame * 2..end_frame * 2]);
+        let data = StaticSoundData {
+            sample_rate: TARGET_SAMPLE_RATE,
+            frames: Arc::from(frames),
+            settings: StaticSoundSettings::default(),
+            slice: None,
+        };
+        let handle = self.manager.play(data).map_err(|e| EngineError::Backend(e.to_string()))?;
+        self.preview = Some(handle);
+        Ok(())
+    }
+
+    /// Corta el preview activo, si hay uno. No-op si no hay nada sonando.
+    pub fn stop_preview(&mut self) {
+        if let Some(mut handle) = self.preview.take() {
+            handle.stop(Tween::default());
+        }
     }
 
     /// Lee posición/estado de las voces activas para los eventos `pad-tick` /
@@ -195,6 +238,37 @@ impl AudioEngine {
 
 fn tween_ms(ms: u32) -> Tween {
     Tween { duration: Duration::from_millis(ms as u64), ..Default::default() }
+}
+
+/// Convierte un buffer estéreo intercalado (como los que produce
+/// `normalize::import_pipeline`) a los `Frame` que espera kira. Pura —
+/// separa la conversión de datos de la reproducción en sí, que sí necesita
+/// hardware (cpal). Usada por el preview del editor de recorte (SPEC-recorte-v2.md).
+fn stereo_to_frames(stereo: &[f32]) -> Vec<Frame> {
+    stereo.chunks_exact(2).map(|frame| Frame::new(frame[0], frame[1])).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stereo_to_frames_pairs_left_and_right_samples() {
+        let stereo = vec![0.1, -0.1, 0.2, -0.2, 0.3, -0.3];
+
+        let frames = stereo_to_frames(&stereo);
+
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0], Frame::new(0.1, -0.1));
+        assert_eq!(frames[1], Frame::new(0.2, -0.2));
+        assert_eq!(frames[2], Frame::new(0.3, -0.3));
+    }
+
+    #[test]
+    fn stereo_to_frames_of_empty_buffer_is_empty() {
+        let frames = stereo_to_frames(&[]);
+        assert!(frames.is_empty());
+    }
 }
 
 fn negotiated_stream_config(device: &cpal::Device) -> cpal::StreamConfig {

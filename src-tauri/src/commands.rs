@@ -12,6 +12,19 @@ use crate::storage;
 /// `None` hasta que `init_engine` logra abrir un dispositivo de salida.
 pub struct EngineState(pub Mutex<Option<AudioEngine>>);
 
+/// Buffer decodificado + resampleado del archivo que el editor de recorte
+/// tiene abierto ahora mismo. Poblado por `analyze_source`, consultado por
+/// `snap_region`/`preview_region`/`import_pad`, liberado por
+/// `clear_source_cache` al cerrar el modal. Evita decodificar el mismo MP3
+/// tres veces (SPEC-recorte-v2.md "Forma de onda").
+pub struct SourceCache {
+    pub source_path: String,
+    pub stereo_48k: Vec<f32>,
+    pub source_sample_rate: u32,
+    pub source_channels: u8,
+}
+pub struct SourceCacheState(pub Mutex<Option<SourceCache>>);
+
 fn app_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -263,19 +276,58 @@ pub fn list_output_devices() -> Vec<DeviceInfo> {
 /// en `audio/{pad_uuid}.wav` y agrega el pad al banco activo (creándolo si es
 /// el primer pad de la app). Fase 3: modal de agregar pad de punta a punta.
 #[tauri::command]
-pub fn import_pad(
+#[allow(clippy::too_many_arguments)] // firma plana 1:1 con el payload de invoke() del frontend
+pub async fn import_pad(
     app: tauri::AppHandle,
     source_path: String,
     name: String,
     color: String,
     hotkey: Option<String>,
     midi_note: Option<u8>,
+    trim_start_ms: Option<u32>,
+    trim_end_ms: Option<u32>,
 ) -> Result<Pad, String> {
     let cfg_path = config_path(&app)?;
     let mut config = storage::load_or_default(&cfg_path).map_err(|e| e.to_string())?;
 
-    let result = normalize::import_pipeline(std::path::Path::new(&source_path), config.target_lufs)
-        .map_err(|e| e.to_string())?;
+    let trim = match (trim_start_ms, trim_end_ms) {
+        (Some(start_ms), Some(end_ms)) => Some(crate::audio::trim::TrimRegion { start_ms, end_ms }),
+        _ => None,
+    };
+
+    // Si el editor de recorte ya decodificó y cacheó este mismo archivo, se
+    // reusa el buffer en vez de decodificar el MP3 una tercera vez.
+    let cached = app.try_state::<SourceCacheState>().and_then(|s| {
+        s.0.lock().ok().and_then(|guard| guard.as_ref().filter(|c| c.source_path == source_path).map(|c| (c.stereo_48k.clone(), c.source_sample_rate, c.source_channels)))
+    });
+
+    // Generado antes del trabajo pesado para poder escribir el WAV en el
+    // mismo hilo bloqueante, sin un segundo salto de ida y vuelta.
+    let pad_id = uuid::Uuid::new_v4().to_string();
+    let audio_dir = app_dir(&app)?.join("audio");
+    std::fs::create_dir_all(&audio_dir).map_err(|e| e.to_string())?;
+    let wav_path = audio_dir.join(format!("{pad_id}.wav"));
+
+    let target_lufs = config.target_lufs;
+    let source_path_for_decode = source_path.clone();
+    // Decodificar, resamplear, medir LUFS y escribir el WAV son CPU/IO
+    // pesados (varios segundos en un MP3 de un minuto) — corren en el pool
+    // de hilos bloqueantes de Tauri para no congelar el WebView, que de
+    // otro modo se queda sin poder pintar ni el texto de "normalizando..."
+    // mientras el comando corre en el mismo hilo que despacha el IPC.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let result = match cached {
+            Some((stereo, source_sample_rate, source_channels)) => {
+                normalize::normalize_stereo(stereo, source_sample_rate, source_channels, target_lufs, trim)?
+            }
+            None => normalize::import_pipeline(std::path::Path::new(&source_path_for_decode), target_lufs, trim)?,
+        };
+        normalize::write_wav(&wav_path, &result.stereo_48k)?;
+        Ok::<_, normalize::NormalizeError>(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
 
     let duration_ms = (result.stereo_48k.len() / 2) as f64 / normalize::TARGET_SAMPLE_RATE as f64 * 1000.0;
     let original_filename = std::path::Path::new(&source_path)
@@ -295,6 +347,7 @@ pub fn import_pad(
         .ok_or_else(|| "banco activo no encontrado".to_string())?;
 
     let pad = Pad {
+        id: pad_id,
         name,
         color,
         hotkey,
@@ -312,16 +365,122 @@ pub fn import_pad(
     bank.validate_hotkey(&pad)?;
     bank.validate_midi_note(&pad)?;
 
-    let audio_dir = app_dir(&app)?.join("audio");
-    std::fs::create_dir_all(&audio_dir).map_err(|e| e.to_string())?;
-    let wav_path = audio_dir.join(format!("{}.wav", pad.id));
-    normalize::write_wav(&wav_path, &result.stereo_48k).map_err(|e| e.to_string())?;
-
     bank.pads.push(pad.clone());
     storage::save(&cfg_path, &config).map_err(|e| e.to_string())?;
     refresh_live_state(&app, &config)?;
 
     Ok(pad)
+}
+
+/// Cuántos buckets de picos min/max se calculan para la forma de onda del
+/// editor de recorte — no se manda la muestra cruda al WebView, un minuto a
+/// 48kHz estéreo son ~5.7M valores (SPEC-recorte-v2.md "Forma de onda").
+const WAVEFORM_BUCKETS: usize = 2000;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceAnalysis {
+    pub duration_ms: u32,
+    /// Un `Vec` por canal (L, R); cada uno el pico con signo de mayor
+    /// magnitud por bucket — wavesurfer.js dibuja un array plano por canal,
+    /// no pares min/max intercalados.
+    pub peaks: Vec<Vec<f32>>,
+    pub source_sample_rate: u32,
+    pub source_channels: u8,
+}
+
+/// Decodifica y resamplea el archivo elegido en el editor de "Agregar Pad",
+/// calcula los picos para la forma de onda y cachea el buffer en memoria
+/// para que `snap_region`/`preview_region`/`import_pad` no vuelvan a
+/// decodificarlo (SPEC-recorte-v2.md).
+#[tauri::command]
+pub async fn analyze_source(app: tauri::AppHandle, source_path: String) -> Result<SourceAnalysis, String> {
+    let path_for_decode = source_path.clone();
+    // Decodificar un MP3 de un minuto + resamplear a alta calidad + calcular
+    // 2000 picos toma varios segundos — igual que en `import_pad`, corre en
+    // el pool de hilos bloqueantes para que el WebView pueda seguir pintando
+    // "Cargando forma de onda..." en vez de parecer colgado.
+    let (stereo, source_sample_rate, source_channels, peaks) = tauri::async_runtime::spawn_blocking(move || {
+        let decoded = normalize::decode_file(std::path::Path::new(&path_for_decode))?;
+        let resampled = normalize::resample_to_48k(&decoded.samples, decoded.channels, decoded.sample_rate)?;
+        let stereo = normalize::to_stereo(&resampled, decoded.channels);
+        let peaks = crate::audio::trim::compute_peaks(&stereo, WAVEFORM_BUCKETS);
+        Ok::<_, normalize::NormalizeError>((stereo, decoded.sample_rate, decoded.channels, peaks))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let duration_ms = (stereo.len() / 2) as f64 / normalize::TARGET_SAMPLE_RATE as f64 * 1000.0;
+
+    let state = app.state::<SourceCacheState>();
+    let mut guard = state.0.lock().map_err(|_| "cache de análisis no disponible".to_string())?;
+    *guard = Some(SourceCache { source_path, stereo_48k: stereo, source_sample_rate, source_channels });
+
+    Ok(SourceAnalysis {
+        duration_ms: duration_ms.round() as u32,
+        peaks,
+        source_sample_rate,
+        source_channels,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnappedRegion {
+    pub start_ms: u32,
+    pub end_ms: u32,
+}
+
+/// Snapea ambos bordes de la región al cruce por cero más cercano contra el
+/// buffer cacheado por `analyze_source` — el frontend actualiza los campos
+/// numéricos con este valor al soltar cada handle (SPEC-recorte-v2.md "Snap
+/// a cruce por cero"). El mismo snap se vuelve a aplicar en `import_pad`
+/// (idempotente), así que lo que el usuario ve es lo que obtiene.
+#[tauri::command]
+pub fn snap_region(state: tauri::State<SourceCacheState>, start_ms: u32, end_ms: u32) -> Result<SnappedRegion, String> {
+    let guard = state.0.lock().map_err(|_| "cache de análisis no disponible".to_string())?;
+    let cache = guard.as_ref().ok_or("no hay un archivo analizado — llamar a analyze_source primero")?;
+
+    let ms_to_frame = |ms: u32| (ms as u64 * normalize::TARGET_SAMPLE_RATE as u64 / 1000) as usize;
+    let frame_to_ms = |frame: usize| (frame as u64 * 1000 / normalize::TARGET_SAMPLE_RATE as u64) as u32;
+
+    let start = crate::audio::trim::snap_to_zero_crossing(&cache.stereo_48k, ms_to_frame(start_ms), crate::audio::trim::ZERO_CROSSING_SEARCH_FRAMES);
+    let end = crate::audio::trim::snap_to_zero_crossing(&cache.stereo_48k, ms_to_frame(end_ms), crate::audio::trim::ZERO_CROSSING_SEARCH_FRAMES);
+
+    Ok(SnappedRegion { start_ms: frame_to_ms(start), end_ms: frame_to_ms(end) })
+}
+
+/// Reproduce la región elegida por el mismo device que los pads — nunca por
+/// el device por defecto del sistema — para que el usuario juzgue el
+/// recorte tal como sonará al aire (PLAN.md §2, SPEC-recorte-v2.md).
+#[tauri::command]
+pub fn preview_region(engine_state: tauri::State<EngineState>, cache_state: tauri::State<SourceCacheState>, start_ms: u32, end_ms: u32) -> Result<(), String> {
+    let cache_guard = cache_state.0.lock().map_err(|_| "cache de análisis no disponible".to_string())?;
+    let cache = cache_guard.as_ref().ok_or("no hay un archivo analizado — llamar a analyze_source primero")?;
+
+    let mut engine_guard = engine_state.0.lock().map_err(|_| "motor no disponible".to_string())?;
+    let engine = engine_guard.as_mut().ok_or("motor de audio no inicializado")?;
+    engine.preview(&cache.stereo_48k, start_ms, end_ms).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn stop_preview(state: tauri::State<EngineState>) -> Result<(), String> {
+    let mut guard = state.0.lock().map_err(|_| "motor no disponible".to_string())?;
+    if let Some(engine) = guard.as_mut() {
+        engine.stop_preview();
+    }
+    Ok(())
+}
+
+/// Libera el buffer cacheado por `analyze_source` — llamado al cerrar o
+/// cancelar el modal de "Agregar Pad" para no dejar un minuto de audio
+/// decodificado en memoria indefinidamente.
+#[tauri::command]
+pub fn clear_source_cache(state: tauri::State<SourceCacheState>) -> Result<(), String> {
+    let mut guard = state.0.lock().map_err(|_| "cache de análisis no disponible".to_string())?;
+    *guard = None;
+    Ok(())
 }
 
 /// Reemplaza un pad completo (trim, loop, nombre, color, re-disparo, fades...)

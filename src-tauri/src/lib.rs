@@ -15,6 +15,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            use tauri::Manager;
+            app.manage(commands::SourceCacheState(std::sync::Mutex::new(None)));
             if let Err(e) = commands::init_engine(&app.handle().clone()) {
                 // No tirar la app abajo si no hay dispositivo de salida al arrancar;
                 // el usuario puede elegir uno en Configuración más adelante.
@@ -31,6 +33,11 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
             commands::import_pad,
+            commands::analyze_source,
+            commands::snap_region,
+            commands::preview_region,
+            commands::stop_preview,
+            commands::clear_source_cache,
             commands::update_pad,
             commands::delete_pad,
             commands::reorder_pads,

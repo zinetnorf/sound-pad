@@ -125,6 +125,25 @@ export interface Dictionary {
     assigned: (note: number) => string;
     assign: string;
   };
+  trimEditor: {
+    title: string;
+    trimButton: string;
+    analyzing: string;
+    analyzeError: (err: string) => string;
+    startLabel: string;
+    endLabel: string;
+    nudgeHint: string;
+    play: string;
+    pause: string;
+    goToStart: string;
+    goToEnd: string;
+    previewError: (err: string) => string;
+    confirm: string;
+    invalidNumber: string;
+    outOfRange: (minMs: number, maxMs: number) => string;
+    startAfterEnd: string;
+    endBeforeStart: string;
+  };
 }
 
 export const en: Dictionary = {
@@ -253,6 +272,25 @@ export const en: Dictionary = {
     assigned: (note) => `MIDI note: ${note}`,
     assign: "MIDI learn",
   },
+  trimEditor: {
+    title: "Trim the clip",
+    trimButton: "Trim",
+    analyzing: "Loading waveform...",
+    analyzeError: (err) => `Couldn't load the waveform: ${err}`,
+    startLabel: "Start (ms)",
+    endLabel: "End (ms)",
+    nudgeHint: "Arrow keys nudge the selected handle by 10ms (Shift: 100ms).",
+    play: "Play selection",
+    pause: "Pause",
+    goToStart: "Jump to start",
+    goToEnd: "Jump to end",
+    previewError: (err) => `Preview failed: ${err}`,
+    confirm: "Use this trim",
+    invalidNumber: "Enter a valid number of milliseconds.",
+    outOfRange: (minMs, maxMs) => `Must be between ${minMs} and ${maxMs}ms.`,
+    startAfterEnd: "Start must be at least 50ms before the end.",
+    endBeforeStart: "End must be at least 50ms after the start.",
+  },
 };
 
 export const es: Dictionary = {
@@ -380,5 +418,24 @@ export const es: Dictionary = {
     listening: "Tocá el pad físico... (clic cancela)",
     assigned: (note) => `Nota MIDI: ${note}`,
     assign: "MIDI learn",
+  },
+  trimEditor: {
+    title: "Recortar el audio",
+    trimButton: "Recortar",
+    analyzing: "Cargando forma de onda...",
+    analyzeError: (err) => `No se pudo cargar la forma de onda: ${err}`,
+    startLabel: "Inicio (ms)",
+    endLabel: "Fin (ms)",
+    nudgeHint: "Las flechas mueven el handle seleccionado 10ms (Shift: 100ms).",
+    play: "Reproducir selección",
+    pause: "Pausar",
+    goToStart: "Ir al inicio",
+    goToEnd: "Ir al final",
+    previewError: (err) => `Error al reproducir: ${err}`,
+    confirm: "Usar este recorte",
+    invalidNumber: "Ingresá un número válido de milisegundos.",
+    outOfRange: (minMs, maxMs) => `Debe estar entre ${minMs} y ${maxMs}ms.`,
+    startAfterEnd: "El inicio debe quedar al menos 50ms antes del fin.",
+    endBeforeStart: "El fin debe quedar al menos 50ms después del inicio.",
   },
 };

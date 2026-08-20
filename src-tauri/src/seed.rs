@@ -38,7 +38,7 @@ pub fn seed_default_config(app: &tauri::AppHandle, audio_dir: &Path) -> Result<A
     for (order, (name, filename)) in DEFAULT_PADS.iter().enumerate() {
         let source_path = pads_dir.join(filename);
         let result =
-            normalize::import_pipeline(&source_path, target_lufs).map_err(|e| format!("{filename}: {e}"))?;
+            normalize::import_pipeline(&source_path, target_lufs, None).map_err(|e| format!("{filename}: {e}"))?;
         let duration_ms = (result.stereo_48k.len() / 2) as f64 / normalize::TARGET_SAMPLE_RATE as f64 * 1000.0;
 
         let pad = Pad {

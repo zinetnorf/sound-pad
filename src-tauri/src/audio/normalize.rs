@@ -24,6 +24,8 @@ pub enum NormalizeError {
     ResamplerConstruction(#[from] rubato::ResamplerConstructionError),
     #[error("error al escribir el WAV: {0}")]
     Wav(#[from] hound::Error),
+    #[error("error al recortar el audio: {0}")]
+    Trim(#[from] super::trim::TrimError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -259,11 +261,55 @@ pub struct ImportResult {
 }
 
 /// Pipeline completo de importación de un pad: decodificar, resamplear,
-/// normalizar a estéreo, medir, calcular y aplicar ganancia (PLAN.md §6.3).
-pub fn import_pipeline(path: &std::path::Path, target_lufs: f32) -> Result<ImportResult, NormalizeError> {
+/// normalizar a estéreo, recortar (si se pide), aplicar micro-fades, medir,
+/// calcular y aplicar ganancia (PLAN.md §6.3, SPEC-recorte-v2.md).
+///
+/// Orden obligatorio: el recorte y los micro-fades ocurren ANTES de medir
+/// LUFS — medir sobre el archivo completo cuando el pad es un fragmento
+/// rompe la homologación de volúmenes (SPEC-recorte-v2.md, "Orden
+/// obligatorio: recortar ANTES de medir").
+pub fn import_pipeline(
+    path: &std::path::Path,
+    target_lufs: f32,
+    trim: Option<super::trim::TrimRegion>,
+) -> Result<ImportResult, NormalizeError> {
     let decoded = decode_file(path)?;
     let resampled = resample_to_48k(&decoded.samples, decoded.channels, decoded.sample_rate)?;
-    let mut stereo = to_stereo(&resampled, decoded.channels);
+    let stereo = to_stereo(&resampled, decoded.channels);
+    normalize_stereo(stereo, decoded.sample_rate, decoded.channels, target_lufs, trim)
+}
+
+/// Segunda mitad de `import_pipeline`, a partir de un buffer ya decodificado,
+/// resampleado a 48kHz y convertido a estéreo. Existe por separado para que
+/// `commands::analyze_source` pueda cachear ese buffer (decodificar un MP3 de
+/// un minuto para dibujar la forma de onda, snapear y luego importar no debe
+/// repetirse tres veces — SPEC-recorte-v2.md).
+pub fn normalize_stereo(
+    mut stereo: Vec<f32>,
+    source_sample_rate: u32,
+    source_channels: u8,
+    target_lufs: f32,
+    trim: Option<super::trim::TrimRegion>,
+) -> Result<ImportResult, NormalizeError> {
+    if let Some(region) = trim {
+        let ms_to_frame = |ms: u32| (ms as u64 * TARGET_SAMPLE_RATE as u64 / 1000) as usize;
+        let start = super::trim::snap_to_zero_crossing(
+            &stereo,
+            ms_to_frame(region.start_ms),
+            super::trim::ZERO_CROSSING_SEARCH_FRAMES,
+        );
+        let end = super::trim::snap_to_zero_crossing(
+            &stereo,
+            ms_to_frame(region.end_ms),
+            super::trim::ZERO_CROSSING_SEARCH_FRAMES,
+        );
+        stereo = super::trim::slice_stereo(&stereo, start, end)?;
+    }
+
+    // Micro-fades obligatorios en TODO import, con o sin recorte (SPEC-recorte-v2.md
+    // "Micro-fades en los bordes") — independientes de fade_in_ms/fade_out_ms del
+    // pad, que son un Tween de kira en tiempo de reproducción, no en el archivo.
+    super::trim::apply_edge_fades(&mut stereo, super::trim::MICRO_FADE_FRAMES);
 
     let measurement = measure_loudness(&stereo, TARGET_SAMPLE_RATE)?;
     let gain = compute_gain(measurement.loudness_lufs, target_lufs, measurement.true_peak_dbtp);
@@ -271,8 +317,8 @@ pub fn import_pipeline(path: &std::path::Path, target_lufs: f32) -> Result<Impor
 
     Ok(ImportResult {
         stereo_48k: stereo,
-        source_sample_rate: decoded.sample_rate,
-        source_channels: decoded.channels,
+        source_sample_rate,
+        source_channels,
         measured_lufs: measurement.loudness_lufs,
         applied_gain_db: gain.gain_db,
         gain_capped: gain.capped,
@@ -392,7 +438,7 @@ mod tests {
         let src_path = dir.path().join("source.wav");
         write_mono_wav(&src_path, 22_050, 1.5);
 
-        let result = import_pipeline(&src_path, -16.0).unwrap();
+        let result = import_pipeline(&src_path, -16.0, None).unwrap();
         assert_eq!(result.source_sample_rate, 22_050);
         assert_eq!(result.source_channels, 1);
         assert!(result.measured_lufs.is_finite());
@@ -413,6 +459,77 @@ mod tests {
     }
 
     #[test]
+    fn import_pipeline_measures_lufs_of_the_trimmed_fragment_not_the_whole_file() {
+        // 55s de un tono fuerte (una música/ambiente de fondo) + 5s de un
+        // tono bastante más bajo (el diálogo/efecto que el usuario quiere
+        // extraer). El loudness del minuto completo está dominado por los
+        // 55s fuertes — mide eso y el fragmento quedaría subido apenas unos
+        // dB en vez del boost real que necesita. Recortar ANTES de medir es
+        // la única forma de que el pad quede en el target del fragmento, no
+        // del archivo completo (SPEC-recorte-v2.md, orden obligatorio).
+        let dir = tempfile::tempdir().unwrap();
+        let src_path = dir.path().join("source.wav");
+
+        let mut full = sine_tone(0.5, 1000.0, 55.0, TARGET_SAMPLE_RATE);
+        full.extend(sine_tone(0.02, 1000.0, 5.0, TARGET_SAMPLE_RATE));
+        write_wav(&src_path, &full).unwrap();
+
+        let trim = crate::audio::trim::TrimRegion { start_ms: 55_000, end_ms: 60_000 };
+        let trimmed = import_pipeline(&src_path, -16.0, Some(trim)).unwrap();
+        let untrimmed = import_pipeline(&src_path, -16.0, None).unwrap();
+
+        assert!(
+            trimmed.measured_lufs < untrimmed.measured_lufs - 10.0,
+            "trimmed={} untrimmed={} — el recorte no está afectando la medición",
+            trimmed.measured_lufs,
+            untrimmed.measured_lufs
+        );
+
+        let remeasured = measure_loudness(&trimmed.stereo_48k, TARGET_SAMPLE_RATE).unwrap();
+        assert!(
+            (remeasured.loudness_lufs - (-16.0)).abs() < 1.0,
+            "el fragmento normalizado quedó en {} LUFS, esperaba ~-16",
+            remeasured.loudness_lufs
+        );
+    }
+
+    #[test]
+    fn normalize_stereo_forwards_source_metadata_and_applies_trim() {
+        // `normalize_stereo` es el paso "decodificar ya hecho, normalizar
+        // desde aquí" que reusa `commands::analyze_source` para no volver a
+        // decodificar el archivo (SPEC-recorte-v2.md, cache del editor).
+        let stereo = sine_tone(0.2, 1000.0, 5.0, TARGET_SAMPLE_RATE);
+        let trim = crate::audio::trim::TrimRegion { start_ms: 1000, end_ms: 3000 };
+
+        let result = normalize_stereo(stereo, 44_100, 1, -16.0, Some(trim)).unwrap();
+
+        assert_eq!(result.source_sample_rate, 44_100);
+        assert_eq!(result.source_channels, 1);
+        // 2s recortados a 48kHz estéreo (más/menos el ajuste del snap a cruce por cero).
+        let frames = result.stereo_48k.len() / 2;
+        let expected_frames = 2 * TARGET_SAMPLE_RATE as usize;
+        assert!(
+            (frames as i64 - expected_frames as i64).abs() < 500,
+            "frames={frames} esperado~{expected_frames}"
+        );
+    }
+
+    #[test]
+    fn import_pipeline_applies_micro_fades_to_every_import_even_without_trim() {
+        // SPEC-recorte-v2.md: los micro-fades son obligatorios e independientes
+        // de fade_in_ms/fade_out_ms del pad, así que se aplican también cuando
+        // no hay recorte (decisión de diseño para no dejar un hueco de chasquido
+        // en archivos que empiezan/terminan a mitad de un transitorio).
+        let dir = tempfile::tempdir().unwrap();
+        let src_path = dir.path().join("source.wav");
+        write_mono_wav(&src_path, 48_000, 1.0);
+
+        let result = import_pipeline(&src_path, -16.0, None).unwrap();
+
+        assert_eq!(result.stereo_48k[0], 0.0, "primera muestra debería quedar en 0 por el fade-in");
+    }
+
+    #[test]
     fn import_pipeline_never_exceeds_true_peak_ceiling_even_from_a_loud_source() {
         // Fuente ya casi a 0dBFS: la ganancia de normalización debe recortarse
         // para no pasar de -1dBTP (criterio de aceptación, PLAN.md §14).
@@ -420,7 +537,7 @@ mod tests {
         let src_path = dir.path().join("loud.wav");
         write_mono_wav(&src_path, 48_000, 2.0); // amplitud 0.5 fija en write_mono_wav
 
-        let result = import_pipeline(&src_path, 0.0).unwrap(); // target absurdamente alto a propósito
+        let result = import_pipeline(&src_path, 0.0, None).unwrap(); // target absurdamente alto a propósito
         assert!(result.gain_capped);
 
         let remeasured = measure_loudness(&result.stereo_48k, TARGET_SAMPLE_RATE).unwrap();
